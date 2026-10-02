@@ -894,6 +894,8 @@ Private Sub SortIPTable(ByRef ws As Worksheet)
         data(j + 1, 2) = tmpName
     Next i
     
+    ' Vorher leeren, damit leere Zellen im Array auch wirklich leer geschrieben werden
+    ws.Range("A2:B" & lastRow).ClearContents
     ws.Range("A2:B" & lastRow).Value = data
 End Sub
 
@@ -932,7 +934,7 @@ Private Function NormalizeIP(ByVal strIP As String) As String
         ' Nur 1-3 Ziffern pro Oktett erlaubt
         If Len(parts(p)) = 0 Or Len(parts(p)) > 3 Then Exit Function
         For c = 1 To Len(parts(p))
-            If Not Mid$(parts(p), c, 1) Like "[0-9]" Then Exit Function
+            If Not (Mid$(parts(p), c, 1) Like "[0-9]") Then Exit Function
         Next c
         
         If CLng(parts(p)) > 255 Then Exit Function
@@ -950,8 +952,9 @@ Private Function LoadNameLookup() As Collection
     Dim ws As Worksheet
     Dim lr As Long, i As Long
     Dim ip As String
+    Dim lookup As New Collection
     
-    Set LoadNameLookup = New Collection
+    Set LoadNameLookup = lookup
     
     ' Blatt fehlt, doppelte IP (erster Name gewinnt) oder Fehlerwerte -> überspringen
     On Error Resume Next
@@ -962,7 +965,7 @@ Private Function LoadNameLookup() As Collection
     For i = 2 To lr
         ip = ""
         ip = NormalizeIP(CStr(ws.Cells(i, 1).Value))
-        If ip <> "" Then LoadNameLookup.Add CStr(ws.Cells(i, 2).Value), ip
+        If ip <> "" Then lookup.Add CStr(ws.Cells(i, 2).Value), ip
     Next i
 End Function
 
