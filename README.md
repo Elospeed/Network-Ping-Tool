@@ -9,8 +9,10 @@ Entstanden ist das Tool, weil das manuelle Anpingen einzelner Geräte über das 
 ## Funktionen
 
 - Schnelles ICMP-Ping direkt über die Windows-API (`iphlpapi.dll`) – keine externen Programme nötig
-- Drei Scan-Modi
-- Sauberer Abbruch laufender Scans
+- Drei Scan-Modi (Einzel-IP, IP-Liste, ganzer Range .0–.255)
+- Gerätename aus der IP-Liste direkt in den Ergebnissen (IP | Name | Status | RTT)
+- Stopp-Button bricht einen laufenden Scan ab, ohne Excel zu schliessen
+- IPs mit führenden Nullen (z. B. `192.168.001.010`) werden korrekt als `192.168.1.10` gepingt
 - Eigenständiger UserForm-Modus
 - Korrekte numerische IP-Sortierung (statt alphabetischer Sortierung)
 - Bewusst kein paralleles Pingen, um Konflikte mit Unternehmens-Firewalls/Endpoint-Security (z. B. Sophos) zu vermeiden
@@ -22,7 +24,7 @@ Entstanden ist das Tool, weil das manuelle Anpingen einzelner Geräte über das 
 
 ## Installation
 
-1. Die Datei `NetworkPingTool.xlsm` herunterladen.
+1. Die Datei `Network-Ping-Tool.xlsm` herunterladen.
 2. Beim Öffnen Makros aktivieren (Sicherheitswarnung von Excel bestätigen).
 3. Los geht's – keine weitere Installation oder Zusatzsoftware nötig.
 
@@ -44,12 +46,13 @@ Falls du dem Makro nicht blind vertrauen möchtest (völlig verständlich): Der 
 ## Verwendung
 
 1. Datei öffnen.
-2. IP-Adressen bzw. Hostnamen der zu prüfenden Geräte eintragen.
+2. IP-Adressen der zu prüfenden Geräte eintragen (nur IPv4-Adressen, Hostnamen werden nicht aufgelöst und als „ungültig“ angezeigt).
 3. Scan starten und Ergebnisse in der Liste verfolgen.
-4. Scan kann jederzeit sauber abgebrochen werden.
+4. Ein laufender Scan lässt sich mit dem Stopp-Button abbrechen. Die bis dahin gepingten Geräte bleiben in der Liste stehen.
 
 ## Versionen
 
+- **v1.1.0** – Gerätename in den Ergebnissen, Stopp-Button, führende Nullen werden korrekt behandelt, robustere Sortierung der IP-Liste, `<1 ms` statt `0 ms`
 - **v1.0.0** – Erste veröffentlichte Version
 
 ## Support
