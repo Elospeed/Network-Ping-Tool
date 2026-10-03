@@ -4,6 +4,7 @@ Sammlung von Ideen für die Weiterentwicklung. Neue Einträge oben anfügen, umg
 
 ## Offen
 
+- [ ] **Lizenzfreie Variante ohne Excel** – LibreOffice/OpenOffice Portable reicht nicht ohne Umbau (OpenOffice kaum VBA; LibreOffice: `Declare IcmpSendEcho` mit Struct unzuverlässig, UserForm wird nur grob konvertiert). Optionen: PowerShell-Skript mit `Test-Connection` und CSV-IP-Liste (empfohlen) oder LibreOffice-Makro mit WMI `Win32_PingStatus` und eigenem Dialog.
 - [ ] **.0 und .255 im Range-Modus optional überspringen** – z. B. per Checkbox, damit Broadcast-Antworten nicht als «ONLINE» erscheinen (siehe [PROBLEME.md](PROBLEME.md)).
 - [ ] **Hostnamen auflösen** – Statt «ungültig» den Namen per DNS auflösen (z. B. `getaddrinfo`) und dann pingen.
 
