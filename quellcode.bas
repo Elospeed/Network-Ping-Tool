@@ -103,14 +103,18 @@ Private Const KEYEVENTF_KEYUP As Long = &H2   ' Flag "Taste loslassen"
 ' Wichtig für sauberes Schließen der Form während eines Scans
 Private m_ScanRunning As Boolean
 
-' Flag: Wurde der Scan abgebrochen (z.B. weil Form geschlossen wird)?
+' Flag: Wurde der Scan abgebrochen (Stopp-Button oder Form wird geschlossen)?
 Private m_ScanAbort As Boolean
+
+' Flag: Wird die Form gerade geschlossen? (dann UI nach dem Scan nicht mehr antasten)
+Private m_FormClosing As Boolean
 
 
 '==============================================================================
 '  HAUPT-SCAN-FUNKTION
 '------------------------------------------------------------------------------
-'  Pingt eine oder mehrere IP-Adressen und zeigt die Ergebnisse in der ListBox.
+'  Pingt eine oder mehrere IP-Adressen und zeigt die Ergebnisse in der ListBox
+'  (IP | Name | Status | RTT). Der Name kommt aus Spalte B von "IP-Liste".
 '
 '  Parameter:
 '    targetIP - Die zu pingende IP (bei Range: nur das Subnet, z.B. 10.0.0.0)
@@ -124,15 +128,20 @@ Public Sub RunNetworkScan(ByVal targetIP As String, ByVal isRange As Boolean, _
     
     ' ----- Variablen-Deklarationen -----
     Dim ipList As New Collection      ' Sammlung aller zu pingenden IPs
-    Dim currentIP As String           ' Die gerade aktuell gepingte IP
+    Dim nameLookup As Collection      ' Gerätenamen aus "IP-Liste" (Key = normalisierte IP)
+    Dim currentIP As String           ' Die gerade aktuell gepingte IP (normalisiert)
     Dim pingResult As String          ' Ergebnis vom Ping ("Offline" oder RTT-Wert)
     Dim i As Long, j As Long, k As Long  ' Schleifenzähler
+    Dim scanned As Long               ' Anzahl tatsächlich gepingter IPs (bei Stopp < Gesamt)
     Dim ws As Worksheet               ' Referenz auf das IP-Liste-Tabellenblatt
     Dim lastRow As Long               ' Letzte beschriebene Zeile in der Tabelle
     Dim item As Variant               ' For-Each-Iteration über die Collection
     Dim startTime As Double           ' Zeitstempel für Performance-Messung
     Dim resultsArray() As Variant     ' 2D-Array mit allen Scan-Ergebnissen
+    Dim displayArray() As Variant     ' Was am Ende in der ListBox landet (ggf. sortiert)
     Dim maxBarWidth As Double         ' Maximale Breite des Fortschrittsbalkens
+    Dim nameWidth As Double           ' Breite der Namensspalte in der ListBox
+    Dim errNum As Long, errDesc As String  ' Fehlerinfo für die Fehlerbehandlung
     
     ' Handle für ICMP-Operationen (LongPtr in 64-Bit, Long in 32-Bit)
     #If VBA7 Then
@@ -172,13 +181,17 @@ Public Sub RunNetworkScan(ByVal targetIP As String, ByVal isRange As Boolean, _
         If targetIP <> "" Then ipList.Add targetIP
     End If
     
-    On Error GoTo 0
+    ' Ab hier: Laufzeitfehler -> ScanFehler (Handle schliessen, Buttons freigeben)
+    On Error GoTo ScanFehler
     
     ' Abbruch wenn keine IPs gefunden wurden
     If ipList.count = 0 Then
         MsgBox "Keine IP-Adressen gefunden!", vbExclamation
         Exit Sub
     End If
+    
+    ' Gerätenamen aus dem Tabellenblatt laden (Namensspalte in allen Modi)
+    Set nameLookup = LoadNameLookup()
     
     '--------------------------------------------------------------------------
     '  SCHRITT 2: UI und Datenstrukturen vorbereiten
@@ -188,17 +201,20 @@ Public Sub RunNetworkScan(ByVal targetIP As String, ByVal isRange As Boolean, _
     maxBarWidth = Me.lblBackground.Width
     Me.lblbar.Width = 0
     
-    ' ListBox vorbereiten (3 Spalten: IP | Status | RTT)
+    ' ListBox vorbereiten (4 Spalten: IP | Name | Status | RTT)
     With Me.lstResults
         .Clear
-        .ColumnCount = 3
-        .ColumnWidths = "100;60;50"
+        .ColumnCount = 4
+        ' Namensspalte bekommt die restliche Breite (mind. 90, sonst Scrollbalken)
+        nameWidth = .Width - 80 - 50 - 40 - 15
+        If nameWidth < 90 Then nameWidth = 90
+        .ColumnWidths = "80;" & nameWidth & ";50;40"
     End With
     
     ' Ergebnis-Array erstellen (so groß wie die Anzahl IPs)
     ' Das Array wird in EINEM Schritt am Ende in die ListBox geladen
     ' (schneller als jeden Eintrag einzeln per .AddItem hinzuzufügen!)
-    ReDim resultsArray(1 To ipList.count, 1 To 3)
+    ReDim resultsArray(1 To ipList.count, 1 To 4)
     
     ' ICMP-Handle erstellen (1x für ALLE Pings - viel schneller als pro Ping!)
     hIcmp = IcmpCreateFile()
@@ -215,88 +231,109 @@ Public Sub RunNetworkScan(ByVal targetIP As String, ByVal isRange As Boolean, _
     Application.ScreenUpdating = False       ' UI-Rendering pausieren (schneller!)
     i = 0                                    ' Counter zurücksetzen (WICHTIG!)
     
-    ' Scan-Status setzen (für sauberes Schließen der Form)
+    ' Scan-Status setzen (für Stopp-Button und sauberes Schließen der Form)
     m_ScanRunning = True
     m_ScanAbort = False
     
     ' Buttons während Scan sperren (verhindert Doppel-Klicks und Chaos)
-    Me.btnScan.Enabled = False
-    Me.btnAddIP.Enabled = False
-    Me.btnDeleteIP.Enabled = False
+    Call SetScanButtons(True)
     
     For Each item In ipList
-        ' Prüfen ob Form geschlossen wurde -> Scan sauber abbrechen
+        ' Stopp-Button gedrückt oder Form geschlossen -> Scan sauber abbrechen
         If m_ScanAbort Then Exit For
         
-        currentIP = CStr(item)
         i = i + 1
         
-        ' Eigentlicher Ping-Aufruf
-        pingResult = FastPing(hIcmp, currentIP, PING_TIMEOUT)
+        ' Führende Nullen entfernen: inet_addr liest "010" sonst als Oktal (= 8)!
+        currentIP = NormalizeIP(CStr(item))
         
-        ' Ergebnis in Array schreiben
-        resultsArray(i, 1) = currentIP
-        
-        If pingResult = "Offline" Then
-            resultsArray(i, 2) = "offline"
-            resultsArray(i, 3) = "-"
+        If currentIP = "" Then
+            ' Kein gültiges IPv4-Format (z.B. Hostname oder Tippfehler)
+            resultsArray(i, 1) = CStr(item)
+            resultsArray(i, 2) = ""
+            resultsArray(i, 3) = "ungültig"
+            resultsArray(i, 4) = "-"
         Else
-            resultsArray(i, 2) = "[ONLINE]"
-            resultsArray(i, 3) = pingResult & " ms"
+            ' Eigentlicher Ping-Aufruf
+            pingResult = FastPing(hIcmp, currentIP, PING_TIMEOUT)
+        
+            ' Ergebnis in Array schreiben
+            resultsArray(i, 1) = currentIP
+            resultsArray(i, 2) = LookupName(nameLookup, currentIP)
+            
+            If pingResult = "Offline" Then
+                resultsArray(i, 3) = "offline"
+                resultsArray(i, 4) = "-"
+            ElseIf pingResult = "0" Then
+                ' Wie ping.exe: Antworten unter 1 ms als "<1 ms" anzeigen
+                resultsArray(i, 3) = "[ONLINE]"
+                resultsArray(i, 4) = "<1 ms"
+            Else
+                resultsArray(i, 3) = "[ONLINE]"
+                resultsArray(i, 4) = pingResult & " ms"
+            End If
         End If
         
         ' Fortschrittsbalken aktualisieren
         Me.lblbar.Width = (i / ipList.count) * maxBarWidth
         
         ' Fortschritt im Fenstertitel anzeigen (alle 5 IPs aktualisieren - schneller)
-        If (i Mod 5) = 0 Or i = ipList.count Then
+        If ((i Mod 5) = 0 Or i = ipList.count) And Not m_ScanAbort Then
             Me.Caption = "Scanne... " & i & " / " & ipList.count & " IPs"
         End If
         
-        DoEvents   ' UI-Events verarbeiten (Form bleibt responsive)
+        DoEvents   ' UI-Events verarbeiten (Form bleibt responsive, Stopp-Button)
     Next item
+    
+    scanned = i
     
     ' ICMP-Handle schließen (Speicher freigeben!)
     IcmpCloseHandle hIcmp
+    hIcmp = 0
     
     ' Scan-Status zurücksetzen
     m_ScanRunning = False
     
-    ' Bei Abbruch hier raus (UI nicht mehr antasten - Form wird geschlossen!)
-    If m_ScanAbort Then Exit Sub
+    ' Form wird geschlossen -> UI nicht mehr antasten
+    If m_FormClosing Then Exit Sub
     
-    ' Buttons wieder freigeben (nur wenn nicht abgebrochen wurde)
-    Me.btnScan.Enabled = True
-    Me.btnAddIP.Enabled = True
-    Me.btnDeleteIP.Enabled = True
+    ' Buttons wieder freigeben
+    Call SetScanButtons(False)
+    Application.ScreenUpdating = True
+    
+    ' Sofort gestoppt, bevor die erste IP gepingt wurde
+    If scanned = 0 Then
+        Me.Caption = "Scan gestoppt."
+        Exit Sub
+    End If
     
     '--------------------------------------------------------------------------
-    '  SCHRITT 4: Optionales Sortieren (Online-Geräte nach oben)
+    '  SCHRITT 4: Ergebnisse übernehmen, optional sortiert (Online nach oben)
     '--------------------------------------------------------------------------
+    
+    ' Nur die tatsächlich gepingten Einträge (bei Stopp weniger als geplant)
+    ReDim displayArray(1 To scanned, 1 To 4)
+    k = 0
     
     If Me.chkSort.Value = True Then
-        Dim t1 As String, t2 As String, t3 As String
-        
-        ' Einfaches Bubble-Sort: Tauscht Offline mit dahinterliegendem Online
-        For j = 1 To ipList.count - 1
-            For k = j + 1 To ipList.count
-                If resultsArray(j, 2) = "offline" And _
-                   resultsArray(k, 2) = "[ONLINE]" Then
-                    ' Tauschen
-                    t1 = resultsArray(j, 1)
-                    resultsArray(j, 1) = resultsArray(k, 1)
-                    resultsArray(k, 1) = t1
-                    
-                    t2 = resultsArray(j, 2)
-                    resultsArray(j, 2) = resultsArray(k, 2)
-                    resultsArray(k, 2) = t2
-                    
-                    t3 = resultsArray(j, 3)
-                    resultsArray(j, 3) = resultsArray(k, 3)
-                    resultsArray(k, 3) = t3
-                End If
-            Next k
-        Next j
+        ' Stabil sortieren: zuerst alle Online-, danach alle übrigen Einträge,
+        ' jeweils in der ursprünglichen (numerischen) Reihenfolge
+        For i = 1 To scanned
+            If resultsArray(i, 3) = "[ONLINE]" Then
+                k = k + 1
+                For j = 1 To 4: displayArray(k, j) = resultsArray(i, j): Next j
+            End If
+        Next i
+        For i = 1 To scanned
+            If resultsArray(i, 3) <> "[ONLINE]" Then
+                k = k + 1
+                For j = 1 To 4: displayArray(k, j) = resultsArray(i, j): Next j
+            End If
+        Next i
+    Else
+        For i = 1 To scanned
+            For j = 1 To 4: displayArray(i, j) = resultsArray(i, j): Next j
+        Next i
     End If
     
     '--------------------------------------------------------------------------
@@ -304,12 +341,38 @@ Public Sub RunNetworkScan(ByVal targetIP As String, ByVal isRange As Boolean, _
     '--------------------------------------------------------------------------
     
     ' Komplettes Array auf einen Schlag in die ListBox laden (sehr schnell!)
-    Me.lstResults.List = resultsArray
-    Application.ScreenUpdating = True
+    Me.lstResults.List = displayArray
     
     ' Performance-Info im Fenstertitel anzeigen
-    Me.Caption = "Scan fertig! " & ipList.count & " IPs in " & _
-                 Format(Timer - startTime, "0.0") & " Sek."
+    If m_ScanAbort Then
+        Me.Caption = "Scan gestoppt! " & scanned & " von " & ipList.count & _
+                     " IPs in " & Format(Timer - startTime, "0.0") & " Sek."
+    Else
+        Me.Caption = "Scan fertig! " & ipList.count & " IPs in " & _
+                     Format(Timer - startTime, "0.0") & " Sek."
+    End If
+    Exit Sub
+    
+    '--------------------------------------------------------------------------
+    '  FEHLERBEHANDLUNG: Laufzeitfehler mitten im Scan
+    '  Handle schliessen und Buttons freigeben, damit die Form bedienbar bleibt
+    '--------------------------------------------------------------------------
+ScanFehler:
+    errNum = Err.Number
+    errDesc = Err.Description
+    Resume ScanAufraeumen
+    
+ScanAufraeumen:
+    On Error Resume Next
+    If hIcmp <> 0 Then IcmpCloseHandle hIcmp
+    m_ScanRunning = False
+    Application.ScreenUpdating = True
+    
+    If Not m_FormClosing Then
+        Call SetScanButtons(False)
+        Me.Caption = "Scan mit Fehler beendet"
+        MsgBox "Fehler beim Scan (" & errNum & "): " & errDesc, vbCritical
+    End If
 End Sub
 
 
@@ -394,23 +457,27 @@ Private Sub TextBox4_Change(): Call ValidateIPBox(Me.TextBox4, Nothing):      En
 '------------------------------------------------------------------------------
 Private Sub ValidateIPBox(ByRef CurrentBox As MSForms.TextBox, _
                           ByRef NextBox As MSForms.Control)
+    Dim cleaned As String
+    Dim c As Long
+    
     If CurrentBox.Text <> "" Then
-        ' Punkte und Kommas explizit abfangen (IsNumeric akzeptiert "2.2"!)
-        If InStr(CurrentBox.Text, ".") > 0 Or InStr(CurrentBox.Text, ",") > 0 Then
-            CurrentBox.Text = Replace(Replace(CurrentBox.Text, ".", ""), ",", "")
+        ' Nur Ziffern behalten (IsNumeric würde auch "2.2", "1-" oder "1e2" akzeptieren)
+        For c = 1 To Len(CurrentBox.Text)
+            If Mid$(CurrentBox.Text, c, 1) Like "[0-9]" Then
+                cleaned = cleaned & Mid$(CurrentBox.Text, c, 1)
+            End If
+        Next c
+        
+        If cleaned <> CurrentBox.Text Then
+            ' Löst Change erneut aus -> dort wird der bereinigte Text weiter geprüft
+            CurrentBox.Text = cleaned
             Exit Sub
         End If
         
-        ' Prüfen ob nur Zahlen drin sind
-        If IsNumeric(CurrentBox.Text) Then
-            ' Maximum 255 erzwingen
-            If CLng(CurrentBox.Text) > 255 Then
-                MsgBox "Maximal 255!", vbExclamation
-                CurrentBox.Text = "255"
-            End If
-        Else
-            ' Ungültige Zeichen (Buchstaben etc.) sofort entfernen
-            CurrentBox.Text = ""
+        ' Maximum 255 erzwingen
+        If CLng(CurrentBox.Text) > 255 Then
+            MsgBox "Maximal 255!", vbExclamation
+            CurrentBox.Text = "255"
         End If
         
         ' Auto-Hüpfen zur nächsten Box wenn 3 Stellen erreicht
@@ -507,6 +574,33 @@ Private Sub btnScan_Click()
 End Sub
 
 '------------------------------------------------------------------------------
+' STOPP-BUTTON: Bricht einen laufenden Scan ab, ohne Excel zu schliessen
+'   Der Button "btnStop" muss im Formular-Designer angelegt werden. Fehlt er,
+'   wird dieser Code einfach nie aufgerufen.
+'   Bereits gepingte IPs bleiben in der Ergebnisliste stehen.
+'------------------------------------------------------------------------------
+Private Sub btnStop_Click()
+    If m_ScanRunning Then
+        m_ScanAbort = True
+        Me.Caption = "Scan wird gestoppt..."
+    End If
+End Sub
+
+'------------------------------------------------------------------------------
+' Sperrt/entsperrt die Buttons während eines Scans
+'   btnStop wird über Me.Controls angesprochen, damit der Code auch ohne
+'   diesen Button kompiliert (dann wird er einfach übersprungen)
+'------------------------------------------------------------------------------
+Private Sub SetScanButtons(ByVal scanning As Boolean)
+    Me.btnScan.Enabled = Not scanning
+    Me.btnAddIP.Enabled = Not scanning
+    Me.btnDeleteIP.Enabled = Not scanning
+    
+    On Error Resume Next
+    Me.Controls("btnStop").Enabled = scanning
+End Sub
+
+'------------------------------------------------------------------------------
 ' ADD-IP-BUTTON: Fügt die aktuelle IP zur Liste hinzu (inkl. Gerätename)
 '------------------------------------------------------------------------------
 Private Sub btnAddIP_Click()
@@ -522,9 +616,13 @@ Private Sub btnAddIP_Click()
         Exit Sub
     End If
     
-    ' IP zusammenbauen
-    newIP = Me.TextBox1.Text & "." & Me.TextBox2.Text & "." & _
-            Me.TextBox3.Text & "." & Me.TextBox4.Text
+    ' IP zusammenbauen (führende Nullen entfernen: "010" -> "10")
+    newIP = NormalizeIP(Me.TextBox1.Text & "." & Me.TextBox2.Text & "." & _
+                        Me.TextBox3.Text & "." & Me.TextBox4.Text)
+    If newIP = "" Then
+        MsgBox "IP ungültig!", vbExclamation
+        Exit Sub
+    End If
     
     Set ws = ThisWorkbook.Worksheets("IP-Liste")
     
@@ -666,28 +764,12 @@ End Sub
 
 Private Sub UserForm_QueryClose(Cancel As Integer, CloseMode As Integer)
     ' Wenn gerade ein Scan läuft: Abbruch signalisieren
-    If m_ScanRunning Then
-        ' Schon abgebrochen? Dann nicht nochmal triggern (verhindert Mehrfach-Klicks auf X)
-        If m_ScanAbort Then
-            ' Scan-Abbruch läuft schon - User soll Geduld haben
-            Me.Caption = "Scan wird beendet... bitte warten"
-            Cancel = True   ' Form-Schliessung diesmal abbrechen
-            Exit Sub
-        End If
-        
-        ' Abbruch signalisieren
-        m_ScanAbort = True
-        Me.Caption = "Scan wird abgebrochen..."
-        
-        ' Kurz warten bis Scan-Schleife den Abbruch erkennt
-        ' und das ICMP-Handle sauber schließt
-        Dim waitCounter As Long
-        waitCounter = 0
-        Do While m_ScanRunning And waitCounter < 100   ' Max 5 Sekunden warten
-            DoEvents
-            waitCounter = waitCounter + 1
-        Loop
-    End If
+    ' Warten bringt hier nichts: Die Scan-Schleife steckt im Call-Stack UNTER
+    ' diesem Event (in DoEvents) und läuft erst weiter, wenn dieses Event fertig
+    ' ist. Dann erkennt sie m_ScanAbort, schliesst das ICMP-Handle und fasst
+    ' wegen m_FormClosing die Form nicht mehr an.
+    m_FormClosing = True
+    If m_ScanRunning Then m_ScanAbort = True
     
     ' Excel sauber schließen
     Application.DisplayAlerts = False
@@ -732,6 +814,11 @@ Private Sub UserForm_Initialize()
     Me.TextBox3.MaxLength = 3
     Me.TextBox4.MaxLength = 3
     
+    ' Stopp-Button (optional) ist nur während eines Scans aktiv
+    On Error Resume Next
+    Me.Controls("btnStop").Enabled = False
+    On Error GoTo 0
+    
     Set ws = ThisWorkbook.Worksheets("IP-Liste")
     
     ' ListBox einrichten (2 Spalten: IP | Name)
@@ -756,58 +843,139 @@ End Sub
 '------------------------------------------------------------------------------
 ' Sortiert die IP-Tabelle NUMERISCH (nach Oktetten, nicht alphabetisch!)
 '   Beispiel: 10.0.0.2 kommt VOR 10.0.0.10 (anders als bei Text-Sort!)
+'   Leerzeilen, Hostnamen und Tippfehler landen unten (in bisheriger
+'   Reihenfolge), statt die Sortierung abstürzen zu lassen.
 '------------------------------------------------------------------------------
 
 Private Sub SortIPTable(ByRef ws As Worksheet)
+    ' Schlüssel für ungültige Einträge: grösser als jede IP (max. 2^32 - 1)
+    Const INVALID_KEY As Double = 4294967296#
+    
     Dim lastRow As Long
-    Dim i As Long, j As Long
-    Dim tempIP As String, tempName As String
-    Dim ipA() As String, ipB() As String
-    Dim swap As Boolean
+    Dim data As Variant            ' Spalten A:B als Array (schneller als Zelle für Zelle)
+    Dim keys() As Double           ' Numerischer Sortierschlüssel pro Zeile
+    Dim i As Long, j As Long, n As Long
+    Dim tmpKey As Double, tmpIP As Variant, tmpName As Variant
     
     lastRow = ws.Cells(ws.Rows.count, 1).End(xlUp).Row
     If lastRow < 3 Then Exit Sub   ' Weniger als 2 Einträge - nichts zu sortieren
     
-    ' Bubble-Sort mit numerischem IP-Vergleich
-    ' Bei <100 IPs schnell genug, einfach und verständlich
-    For i = 2 To lastRow - 1
-        For j = 2 To lastRow - i + 1
-            ipA = Split(CStr(ws.Cells(j, 1).Value), ".")
-            ipB = Split(CStr(ws.Cells(j + 1, 1).Value), ".")
-            
-            swap = False
-            
-            ' Oktett für Oktett vergleichen (1. Oktett wichtigster)
-            If CLng(ipA(0)) > CLng(ipB(0)) Then
-                swap = True
-            ElseIf CLng(ipA(0)) = CLng(ipB(0)) Then
-                If CLng(ipA(1)) > CLng(ipB(1)) Then
-                    swap = True
-                ElseIf CLng(ipA(1)) = CLng(ipB(1)) Then
-                    If CLng(ipA(2)) > CLng(ipB(2)) Then
-                        swap = True
-                    ElseIf CLng(ipA(2)) = CLng(ipB(2)) Then
-                        If CLng(ipA(3)) > CLng(ipB(3)) Then
-                            swap = True
-                        End If
-                    End If
-                End If
-            End If
-            
-            ' Zeilen tauschen wenn nötig
-            If swap Then
-                tempIP = ws.Cells(j, 1).Value
-                tempName = ws.Cells(j, 2).Value
-                
-                ws.Cells(j, 1).Value = ws.Cells(j + 1, 1).Value
-                ws.Cells(j, 2).Value = ws.Cells(j + 1, 2).Value
-                
-                ws.Cells(j + 1, 1).Value = tempIP
-                ws.Cells(j + 1, 2).Value = tempName
-            End If
-        Next j
+    data = ws.Range("A2:B" & lastRow).Value
+    n = UBound(data, 1)
+    ReDim keys(1 To n)
+    
+    For i = 1 To n
+        If IsError(data(i, 1)) Then
+            keys(i) = INVALID_KEY
+        Else
+            keys(i) = IPSortKey(CStr(data(i, 1)))
+            If keys(i) < 0 Then keys(i) = INVALID_KEY
+        End If
     Next i
+    
+    ' Insertion-Sort (stabil: gleiche Schlüssel behalten ihre Reihenfolge)
+    ' Bei <100 IPs schnell genug, einfach und verständlich
+    For i = 2 To n
+        tmpKey = keys(i)
+        tmpIP = data(i, 1)
+        tmpName = data(i, 2)
+        
+        j = i - 1
+        Do While j >= 1
+            If keys(j) <= tmpKey Then Exit Do
+            keys(j + 1) = keys(j)
+            data(j + 1, 1) = data(j, 1)
+            data(j + 1, 2) = data(j, 2)
+            j = j - 1
+        Loop
+        
+        keys(j + 1) = tmpKey
+        data(j + 1, 1) = tmpIP
+        data(j + 1, 2) = tmpName
+    Next i
+    
+    ' Vorher leeren, damit leere Zellen im Array auch wirklich leer geschrieben werden
+    ws.Range("A2:B" & lastRow).ClearContents
+    ws.Range("A2:B" & lastRow).Value = data
 End Sub
+
+'------------------------------------------------------------------------------
+' Numerischer Sortierschlüssel einer IP (10.0.0.2 < 10.0.0.10)
+'   Rückgabe -1 wenn kein gültiges IPv4-Format
+'------------------------------------------------------------------------------
+Private Function IPSortKey(ByVal strIP As String) As Double
+    Dim parts() As String
+    
+    strIP = NormalizeIP(strIP)
+    If strIP = "" Then
+        IPSortKey = -1
+        Exit Function
+    End If
+    
+    parts = Split(strIP, ".")
+    IPSortKey = ((CDbl(parts(0)) * 256 + CDbl(parts(1))) * 256 + _
+                 CDbl(parts(2))) * 256 + CDbl(parts(3))
+End Function
+
+'------------------------------------------------------------------------------
+' Normalisiert eine IPv4-Adresse: "192.168.001.010" -> "192.168.1.10"
+'   WICHTIG: inet_addr liest Oktette mit führender 0 als Oktalzahl
+'   ("010" = 8!). Deshalb wird jedes Oktett vorher dezimal umgewandelt.
+'   Rückgabe "" wenn kein gültiges IPv4-Format (Hostname, Tippfehler, leer)
+'------------------------------------------------------------------------------
+Private Function NormalizeIP(ByVal strIP As String) As String
+    Dim parts() As String
+    Dim p As Long, c As Long
+    
+    parts = Split(Trim(strIP), ".")
+    If UBound(parts) <> 3 Then Exit Function   ' Genau 4 Teile nötig
+    
+    For p = 0 To 3
+        ' Nur 1-3 Ziffern pro Oktett erlaubt
+        If Len(parts(p)) = 0 Or Len(parts(p)) > 3 Then Exit Function
+        For c = 1 To Len(parts(p))
+            If Not (Mid$(parts(p), c, 1) Like "[0-9]") Then Exit Function
+        Next c
+        
+        If CLng(parts(p)) > 255 Then Exit Function
+        parts(p) = CStr(CLng(parts(p)))   ' "010" -> "10"
+    Next p
+    
+    NormalizeIP = Join(parts, ".")
+End Function
+
+'------------------------------------------------------------------------------
+' Liest die Gerätenamen aus "IP-Liste" (Spalte A = IP, Spalte B = Name)
+'   Key = normalisierte IP, damit z.B. "192.168.010.5" auch gefunden wird
+'------------------------------------------------------------------------------
+Private Function LoadNameLookup() As Collection
+    Dim ws As Worksheet
+    Dim lr As Long, i As Long
+    Dim ip As String
+    Dim lookup As New Collection
+    
+    Set LoadNameLookup = lookup
+    
+    ' Blatt fehlt, doppelte IP (erster Name gewinnt) oder Fehlerwerte -> überspringen
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets("IP-Liste")
+    If ws Is Nothing Then Exit Function
+    
+    lr = ws.Cells(ws.Rows.count, 1).End(xlUp).Row
+    For i = 2 To lr
+        ip = ""
+        ip = NormalizeIP(CStr(ws.Cells(i, 1).Value))
+        If ip <> "" Then lookup.Add CStr(ws.Cells(i, 2).Value), ip
+    Next i
+End Function
+
+'------------------------------------------------------------------------------
+' Gerätename zu einer (normalisierten) IP, "" wenn nicht in der Liste
+'------------------------------------------------------------------------------
+Private Function LookupName(ByVal lookup As Collection, ByVal ip As String) As String
+    On Error Resume Next
+    LookupName = lookup(ip)
+End Function
 
 Public Sub SpendenLink_Oeffnen()
     ' Öffnet den oben definierten Link im Standardbrowser des Nutzers.
