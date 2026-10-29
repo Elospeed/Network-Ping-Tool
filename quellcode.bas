@@ -114,7 +114,7 @@ Private m_FormClosing As Boolean
 '  HAUPT-SCAN-FUNKTION
 '------------------------------------------------------------------------------
 '  Pingt eine oder mehrere IP-Adressen und zeigt die Ergebnisse in der ListBox
-'  (IP | Name | Status | RTT). Der Name kommt aus Spalte B von "IP-Liste".
+'  (IP | Status | RTT | Name). Der Name kommt aus Spalte B von "IP-Liste".
 '
 '  Parameter:
 '    targetIP - Die zu pingende IP (bei Range: nur das Subnet, z.B. 10.0.0.0)
@@ -201,14 +201,15 @@ Public Sub RunNetworkScan(ByVal targetIP As String, ByVal isRange As Boolean, _
     maxBarWidth = Me.lblBackground.Width
     Me.lblbar.Width = 0
     
-    ' ListBox vorbereiten (4 Spalten: IP | Name | Status | RTT)
+    ' ListBox vorbereiten (4 Spalten: IP | Status | RTT | Name)
+    ' Name steht hinten, damit Status und RTT immer sichtbar bleiben
     With Me.lstResults
         .Clear
         .ColumnCount = 4
-        ' Namensspalte bekommt die restliche Breite (mind. 90, sonst Scrollbalken)
-        nameWidth = .Width - 80 - 50 - 40 - 15
-        If nameWidth < 90 Then nameWidth = 90
-        .ColumnWidths = "80;" & nameWidth & ";50;40"
+        ' Namensspalte bekommt die restliche Breite (mind. 60, sonst Scrollbalken)
+        nameWidth = .Width - 70 - 50 - 35 - 15
+        If nameWidth < 60 Then nameWidth = 60
+        .ColumnWidths = "70;50;35;" & nameWidth
     End With
     
     ' Ergebnis-Array erstellen (so groß wie die Anzahl IPs)
@@ -250,27 +251,27 @@ Public Sub RunNetworkScan(ByVal targetIP As String, ByVal isRange As Boolean, _
         If currentIP = "" Then
             ' Kein gültiges IPv4-Format (z.B. Hostname oder Tippfehler)
             resultsArray(i, 1) = CStr(item)
-            resultsArray(i, 2) = ""
-            resultsArray(i, 3) = "ungültig"
-            resultsArray(i, 4) = "-"
+            resultsArray(i, 2) = "ungültig"
+            resultsArray(i, 3) = "-"
+            resultsArray(i, 4) = ""
         Else
             ' Eigentlicher Ping-Aufruf
             pingResult = FastPing(hIcmp, currentIP, PING_TIMEOUT)
         
             ' Ergebnis in Array schreiben
             resultsArray(i, 1) = currentIP
-            resultsArray(i, 2) = LookupName(nameLookup, currentIP)
+            resultsArray(i, 4) = LookupName(nameLookup, currentIP)
             
             If pingResult = "Offline" Then
-                resultsArray(i, 3) = "offline"
-                resultsArray(i, 4) = "-"
+                resultsArray(i, 2) = "offline"
+                resultsArray(i, 3) = "-"
             ElseIf pingResult = "0" Then
                 ' Wie ping.exe: Antworten unter 1 ms als "<1 ms" anzeigen
-                resultsArray(i, 3) = "[ONLINE]"
-                resultsArray(i, 4) = "<1 ms"
+                resultsArray(i, 2) = "[ONLINE]"
+                resultsArray(i, 3) = "<1 ms"
             Else
-                resultsArray(i, 3) = "[ONLINE]"
-                resultsArray(i, 4) = pingResult & " ms"
+                resultsArray(i, 2) = "[ONLINE]"
+                resultsArray(i, 3) = pingResult & " ms"
             End If
         End If
         
@@ -319,13 +320,13 @@ Public Sub RunNetworkScan(ByVal targetIP As String, ByVal isRange As Boolean, _
         ' Stabil sortieren: zuerst alle Online-, danach alle übrigen Einträge,
         ' jeweils in der ursprünglichen (numerischen) Reihenfolge
         For i = 1 To scanned
-            If resultsArray(i, 3) = "[ONLINE]" Then
+            If resultsArray(i, 2) = "[ONLINE]" Then
                 k = k + 1
                 For j = 1 To 4: displayArray(k, j) = resultsArray(i, j): Next j
             End If
         Next i
         For i = 1 To scanned
-            If resultsArray(i, 3) <> "[ONLINE]" Then
+            If resultsArray(i, 2) <> "[ONLINE]" Then
                 k = k + 1
                 For j = 1 To 4: displayArray(k, j) = resultsArray(i, j): Next j
             End If

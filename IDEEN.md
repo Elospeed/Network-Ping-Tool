@@ -10,6 +10,6 @@ Sammlung von Ideen für die Weiterentwicklung. Neue Einträge oben anfügen, umg
 
 ## Umgesetzt
 
-- [x] **Gerätename in den Ergebnissen** (IP | Name | Status | RTT) – v1.1.0 / PR #1
+- [x] **Gerätename in den Ergebnissen** (IP | Status | RTT | Name) – v1.1.0 / PR #1
 - [x] **Stopp-Button**, der nur den Scan abbricht, ohne Excel zu schliessen – v1.1.0 / PR #1
 - [x] **`<1 ms` statt `0 ms`** wie bei ping.exe – v1.1.0 / PR #1

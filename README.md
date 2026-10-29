@@ -10,7 +10,7 @@ Entstanden ist das Tool, weil das manuelle Anpingen einzelner Geräte über das 
 
 - Schnelles ICMP-Ping direkt über die Windows-API (`iphlpapi.dll`) – keine externen Programme nötig
 - Drei Scan-Modi (Einzel-IP, IP-Liste, ganzer Range .0–.255)
-- Gerätename aus der IP-Liste direkt in den Ergebnissen (IP | Name | Status | RTT)
+- Gerätename aus der IP-Liste direkt in den Ergebnissen (IP | Status | RTT | Name)
 - Stopp-Button bricht einen laufenden Scan ab, ohne Excel zu schliessen
 - IPs mit führenden Nullen (z. B. `192.168.001.010`) werden korrekt als `192.168.1.10` gepingt
 - Eigenständiger UserForm-Modus
